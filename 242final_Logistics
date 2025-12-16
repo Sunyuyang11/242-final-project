@@ -1,0 +1,116 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import classification_report, roc_auc_score, roc_curve
+
+
+df = pd.read_csv('cleaned_shelter_data.csv')
+def train_evaluate_model(df, feature_cols, model_name, target_col='is_adopted'):
+    """
+    输入: 数据框, 特征列列表, 模型名称
+    输出: 模型对象, X_test, y_test, y_pred_proba, metrics字典
+    """
+    print(f"\n======== 正在训练: {model_name} ========")
+    
+    # 1. 准备 X 和 y
+    X_raw = df[feature_cols].copy()
+    y = df[target_col]
+    
+    # 2. 数值变量标准化 (Scaling) - 这里主要是 Age_Months
+    # 逻辑回归对数值范围很敏感，必须做 Standard Scaling
+    scaler = StandardScaler()
+    if 'Age_Months' in X_raw.columns:
+        X_raw['Age_Months'] = scaler.fit_transform(X_raw[['Age_Months']])
+    
+    # 3. 独热编码 (One-Hot Encoding)
+    # drop_first=True 防止多重共线性
+    X = pd.get_dummies(X_raw, drop_first=True)
+    
+    # 4. 拆分训练集/测试集
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+    
+    # 5. 训练逻辑回归
+    # class_weight='balanced' 自动处理样本不平衡
+    model = LogisticRegression(random_state=42, max_iter=2000, class_weight='balanced')
+    model.fit(X_train, y_train)
+    
+    # 6. 预测
+    y_pred = model.predict(X_test)
+    y_pred_proba = model.predict_proba(X_test)[:, 1]
+    
+    # 7. 计算指标
+    auc = roc_auc_score(y_test, y_pred_proba)
+    print(f"ROC-AUC Score: {auc:.4f}")
+    print("Classification Report:")
+    print(classification_report(y_test, y_pred))
+    
+    # 8. 提取特征重要性 (Top 10)
+    coef_df = pd.DataFrame({'Feature': X.columns, 'Coefficient': model.coef_[0]})
+    coef_df['Abs_Val'] = coef_df['Coefficient'].abs()
+    top_features = coef_df.sort_values(by='Abs_Val', ascending=False).head(10)
+    print(f"--- {model_name} Top 10 Features ---")
+    print(top_features[['Feature', 'Coefficient']])
+    
+    return {
+        'model': model,
+        'auc': auc,
+        'X_test': X_test,
+        'y_test': y_test,
+        'y_pred_proba': y_pred_proba,
+        'top_features': top_features
+    }
+
+# ==============================================================================
+# 🚀 训练 Model A: Basic Model (无季节因素)
+# ==============================================================================
+# 排除 ID, Target, 日期, 以及 Season/Month
+basic_cols = [c for c in df.columns if c not in ['is_adopted', 'Season', 'Intake_Month']]
+# 确保只包含有效特征 (再次过滤一下，防止混入杂质)
+valid_basic_cols = ['Animal Type', 'Sex', 'Intake Condition', 'Intake Type', 'Color_Simple', 'Age_Months']
+# 如果你有 Breed 列，记得加上
+if 'Breed' in df.columns: valid_basic_cols.append('Breed')
+
+results_basic = train_evaluate_model(df, valid_basic_cols, "Model A (Basic)")
+
+# ==============================================================================
+# 🚀 训练 Model B: Seasonal Model (加入季节因素)
+# ==============================================================================
+seasonal_cols = valid_basic_cols + ['Season']
+
+# 训练 Seasonal
+results_seasonal = train_evaluate_model(df, seasonal_cols, "Model B (With Season)")
+
+# ==============================================================================
+# 📊 结果对比与画图
+# ==============================================================================
+plt.figure(figsize=(10, 8))
+
+# 画 Model A 曲线
+fpr_a, tpr_a, _ = roc_curve(results_basic['y_test'], results_basic['y_pred_proba'])
+plt.plot(fpr_a, tpr_a, label=f"Model A (Basic), AUC={results_basic['auc']:.3f}", color='blue', linestyle='--')
+
+# 画 Model B 曲线
+fpr_b, tpr_b, _ = roc_curve(results_seasonal['y_test'], results_seasonal['y_pred_proba'])
+plt.plot(fpr_b, tpr_b, label=f"Model B (With Season), AUC={results_seasonal['auc']:.3f}", color='red')
+
+plt.plot([0, 1], [0, 1], 'k--', alpha=0.5) # 对角线
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Model Comparison: Basic vs. Seasonal Factors')
+plt.legend(loc='lower right')
+plt.grid(True)
+plt.show()
+
+# 对比 Top 特征
+print("\n========== 关键发现 ==========")
+season_coefs = results_seasonal['top_features']
+season_rows = season_coefs[season_coefs['Feature'].str.contains('Season')]
+if not season_rows.empty:
+    print("季节因素在 Model B 中的表现:")
+    print(season_rows)
+else:
+    print("季节因素未进入 Top 10 重要性列表，可能影响较小。")

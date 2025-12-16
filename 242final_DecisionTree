@@ -1,0 +1,132 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split, cross_val_score
+from sklearn.tree import DecisionTreeClassifier, plot_tree
+from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score, ConfusionMatrixDisplay
+
+
+
+# Data Setup
+df = pd.read_csv('cleaned_shelter_data.csv')
+
+cols_to_drop = ['is_adopted', 'Season', 'Intake_Month', 'Intake Date', 'Outcome Type', 'Outcome Date']
+X_raw = df.drop(columns=[c for c in cols_to_drop if c in df.columns])
+y = df['is_adopted']
+X = pd.get_dummies(X_raw, drop_first=True)
+
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+# 2. Auto-Pruning
+
+# 计算剪枝路径
+clf = DecisionTreeClassifier(random_state=42, class_weight='balanced', min_samples_leaf=50)
+path = clf.cost_complexity_pruning_path(X_train, y_train)
+alphas = path.ccp_alphas
+
+# 采样 Alpha 
+if len(alphas) > 50:
+    alphas = np.unique(np.concatenate([alphas[::int(len(alphas)/20)], alphas[-30:]]))
+
+# 交叉验证选择最佳 Alpha
+results = []
+for alpha in alphas:
+    dt = DecisionTreeClassifier(random_state=42, class_weight='balanced', min_samples_leaf=50, ccp_alpha=alpha)
+    scores = cross_val_score(dt, X_train, y_train, cv=5, scoring='roc_auc')
+    results.append({'alpha': alpha, 'mean_auc': np.mean(scores), 'std': np.std(scores)})
+
+# 应用 1-SE 准则选择最稳健模型
+res_df = pd.DataFrame(results).sort_values('mean_auc', ascending=False)
+best_stat = res_df.iloc[0]
+threshold = best_stat['mean_auc'] - best_stat['std']
+robust_alpha = res_df[res_df['mean_auc'] >= threshold]['alpha'].max()
+
+print(f"   -> Best Alpha: {best_stat['alpha']:.6f} | Robust Alpha (Selected): {robust_alpha:.6f}")
+
+# 训练最终模型
+final_model = DecisionTreeClassifier(random_state=42, class_weight='balanced', 
+                                     min_samples_leaf=50, ccp_alpha=robust_alpha)
+final_model.fit(X_train, y_train)
+
+# 3.Rule Extraction
+def generate_rules_table(tree_model, feature_names):
+    tree_ = tree_model.tree_
+    feature_name = [feature_names[i] if i != -2 else "undefined!" for i in tree_.feature]
+    paths = []
+    
+    def recurse(node, path):
+        if tree_.feature[node] == -2:
+            real_count = int(tree_.n_node_samples[node]) 
+            weighted_value = tree_.value[node][0]
+            prob = weighted_value[1] / np.sum(weighted_value)
+            
+            paths.append({
+                'Adoption_Rate': round(prob, 3),
+                'Sample_Count': real_count,
+                'Description': " AND ".join(path)
+            })
+            return
+        
+        name = feature_name[node]
+        threshold = tree_.threshold[node]
+        
+        if threshold < 0.9: 
+            left, right = f"NOT {name}", f"{name} is YES"
+        else: 
+            left, right = f"{name} <= {threshold:.1f}", f"{name} > {threshold:.1f}"
+            
+        recurse(tree_.children_left[node], path + [left])
+        recurse(tree_.children_right[node], path + [right])
+
+    recurse(0, [])
+    return pd.DataFrame(paths)
+
+rules_df = generate_rules_table(final_model, list(X.columns))
+rules_df = rules_df.sort_values(by='Adoption_Rate', ascending=False).reset_index(drop=True)
+rules_df.insert(0, 'Rule_ID', rules_df.index + 1)
+
+# 打印预览
+pd.set_option('display.max_colwidth', None)
+pd.set_option('display.width', 1000)
+print("\n" + "="*80)
+print("🏆 最终输出结果：决策树业务规则表 (Top 10)")
+print("="*80)
+print(rules_df.head(10))
+
+rules_df.to_csv('adoption_rules_final.csv', index=False)
+
+# 4. Visualization
+plt.figure(figsize=(25, 12))
+plot_tree(final_model, feature_names=X.columns, filled=True, rounded=True, 
+          class_names=['Low Prob', 'High Prob'], proportion=True, fontsize=11)
+plt.title(f"Decision Tree Rules (Depth={final_model.get_depth()}, Leaves={final_model.get_n_leaves()})")
+plt.savefig('adoption_tree_final.png', dpi=300, bbox_inches='tight')
+print(f"✅ 图片已保存: adoption_tree_final.png")
+
+# 5. Model Evaluation
+
+y_pred = final_model.predict(X_test)
+y_pred_proba = final_model.predict_proba(X_test)[:, 1]
+
+test_auc = roc_auc_score(y_test, y_pred_proba)
+report = classification_report(y_test, y_pred)
+conf_matrix = confusion_matrix(y_test, y_pred)
+
+# 3. 打印结果
+print(f"✅ Final Test AUC Score: {test_auc:.4f}")
+print("-" * 60)
+print("✅ Classification Report:")
+print(report)
+print("-" * 60)
+print("✅ Confusion Matrix (Raw Counts):")
+print(f" [TN  FP]")
+print(f" [FN  TP]")
+print(conf_matrix)
+
+# 4. 可视化混淆矩阵 (保存图片)
+plt.figure(figsize=(8, 6))
+disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=['Low Prob', 'High Prob'])
+disp.plot(cmap='Blues', values_format='d')
+plt.title(f"Confusion Matrix (AUC={test_auc:.4f})")
+plt.savefig('evaluation_confusion_matrix.png', dpi=300, bbox_inches='tight')
+print(f"\n✅ 混淆矩阵图已保存为: evaluation_confusion_matrix.png")

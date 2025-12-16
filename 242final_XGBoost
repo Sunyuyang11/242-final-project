@@ -1,0 +1,49 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
+from sklearn.ensemble import GradientBoostingClassifier 
+
+# 1. 数据准备 
+df = pd.read_csv('cleaned_shelter_data.csv')
+cols_to_drop = ['is_adopted', 'Season', 'Intake_Month', 'Intake Date', 'Outcome Type', 'Outcome Date']
+X = pd.get_dummies(df.drop(columns=[c for c in cols_to_drop if c in df.columns]), drop_first=True)
+y = df['is_adopted']
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+
+# 2. 训练模型 (完全替代 XGBoost)
+# n_estimators=300: 树的数量
+# learning_rate=0.05: 学习率
+# max_depth=5: 树深
+gb_model = GradientBoostingClassifier(
+    n_estimators=300,
+    learning_rate=0.05,
+    max_depth=5,
+    random_state=42,
+)
+
+gb_model.fit(X_train, y_train)
+
+# 3. 评估
+y_pred = gb_model.predict(X_test)
+y_pred_proba = gb_model.predict_proba(X_test)[:, 1]
+auc = roc_auc_score(y_test, y_pred_proba)
+
+print(f"\n✅ Gradient Boosting AUC: {auc:.4f}")
+print("-" * 60)
+print(classification_report(y_test, y_pred))
+
+# 4. 特征重要性
+feat_imp = pd.DataFrame({
+    'Feature': X.columns,
+    'Importance': gb_model.feature_importances_
+}).sort_values('Importance', ascending=False).head(15)
+
+plt.figure(figsize=(10, 6))
+sns.barplot(x='Importance', y='Feature', data=feat_imp, palette='magma')
+plt.title('Feature Importance (Gradient Boosting)', fontsize=14)
+plt.tight_layout()
+plt.show()
